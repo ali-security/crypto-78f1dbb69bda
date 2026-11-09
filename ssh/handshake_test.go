@@ -560,3 +560,143 @@ func TestHandshakeRekeyDefault(t *testing.T) {
 		t.Errorf("got rekey after %dG write, want 64G", wgb)
 	}
 }
+
+// TestNoSHA2Support tests a host key Signer that is not an AlgorithmSigner and
+// therefore can't do SHA-2 signatures. Ensures the server does not advertise
+// support for them in this case.
+func TestNoSHA2Support(t *testing.T) {
+	c1, c2, err := netPipe()
+	if err != nil {
+		t.Fatalf("netPipe: %v", err)
+	}
+	defer c1.Close()
+	defer c2.Close()
+
+	serverConf := &ServerConfig{
+		PasswordCallback: func(conn ConnMetadata, password []byte) (*Permissions, error) {
+			return &Permissions{}, nil
+		},
+	}
+	serverConf.AddHostKey(&legacyRSASigner{testSigners["rsa"]})
+	go func() {
+		_, _, _, err := NewServerConn(c1, serverConf)
+		if err != nil {
+			t.Error(err)
+		}
+	}()
+
+	clientConf := &ClientConfig{
+		User:            "test",
+		Auth:            []AuthMethod{Password("testpw")},
+		HostKeyCallback: FixedHostKey(testSigners["rsa"].PublicKey()),
+	}
+
+	if _, _, _, err := NewClientConn(c2, "", clientConf); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestNoSHA2SupportClientForcesSHA2 tests that a client which only offers
+// rsa-sha2-256/512 host key algorithms can't make a server with a host key
+// Signer that is not an AlgorithmSigner negotiate an algorithm it can't sign
+// with. The handshake must fail cleanly instead of crashing the server.
+func TestNoSHA2SupportClientForcesSHA2(t *testing.T) {
+	c1, c2, err := netPipe()
+	if err != nil {
+		t.Fatalf("netPipe: %v", err)
+	}
+	defer c1.Close()
+	defer c2.Close()
+
+	serverConf := &ServerConfig{
+		PasswordCallback: func(conn ConnMetadata, password []byte) (*Permissions, error) {
+			return &Permissions{}, nil
+		},
+	}
+	serverConf.AddHostKey(&legacyRSASigner{testSigners["rsa"]})
+	serverErr := make(chan error, 1)
+	go func() {
+		_, _, _, err := NewServerConn(c1, serverConf)
+		serverErr <- err
+	}()
+
+	clientConf := &ClientConfig{
+		User:              "test",
+		Auth:              []AuthMethod{Password("testpw")},
+		HostKeyCallback:   FixedHostKey(testSigners["rsa"].PublicKey()),
+		HostKeyAlgorithms: []string{SigAlgoRSASHA2256, SigAlgoRSASHA2512},
+	}
+
+	_, _, _, err = NewClientConn(c2, "", clientConf)
+	if err == nil {
+		t.Fatal("NewClientConn succeeded, want host key negotiation failure")
+	}
+	if !strings.Contains(err.Error(), "no common algorithm for host key") {
+		t.Errorf("NewClientConn: got error %q, want host key negotiation failure", err)
+	}
+
+	if err := <-serverErr; err == nil {
+		t.Error("NewServerConn succeeded, want host key negotiation failure")
+	}
+}
+
+// TestNoSHA2SupportCert tests a host certificate whose underlying Signer is not
+// an AlgorithmSigner and therefore can't do SHA-2 signatures. Ensures the
+// server does not advertise the rsa-sha2-256/512 certificate algorithms in
+// this case.
+func TestNoSHA2SupportCert(t *testing.T) {
+	c1, c2, err := netPipe()
+	if err != nil {
+		t.Fatalf("netPipe: %v", err)
+	}
+	defer c1.Close()
+	defer c2.Close()
+
+	hostSigner := &legacyRSASigner{testSigners["rsa"]}
+	hostCert := &Certificate{
+		Key:             hostSigner.PublicKey(),
+		CertType:        HostCert,
+		ValidPrincipals: []string{"host.example.com"},
+		ValidBefore:     CertTimeInfinity,
+	}
+	if err := hostCert.SignCert(rand.Reader, testSigners["ecdsa"]); err != nil {
+		t.Fatalf("SignCert: %v", err)
+	}
+	certSigner, err := NewCertSigner(hostCert, hostSigner)
+	if err != nil {
+		t.Fatalf("NewCertSigner: %v", err)
+	}
+	if _, ok := certSigner.(AlgorithmSigner); ok {
+		t.Fatal("NewCertSigner returned an AlgorithmSigner for a non-AlgorithmSigner key")
+	}
+
+	serverConf := &ServerConfig{
+		PasswordCallback: func(conn ConnMetadata, password []byte) (*Permissions, error) {
+			return &Permissions{}, nil
+		},
+	}
+	serverConf.AddHostKey(certSigner)
+	go func() {
+		_, _, _, err := NewServerConn(c1, serverConf)
+		if err != nil {
+			t.Error(err)
+		}
+	}()
+
+	var gotHostKey PublicKey
+	clientConf := &ClientConfig{
+		User: "test",
+		Auth: []AuthMethod{Password("testpw")},
+		HostKeyCallback: func(hostname string, remote net.Addr, key PublicKey) error {
+			gotHostKey = key
+			return nil
+		},
+	}
+
+	if _, _, _, err := NewClientConn(c2, "", clientConf); err != nil {
+		t.Fatal(err)
+	}
+	if gotHostKey == nil || gotHostKey.Type() != CertAlgoRSAv01 {
+		t.Errorf("got host key %v, want an %s certificate", gotHostKey, CertAlgoRSAv01)
+	}
+}
