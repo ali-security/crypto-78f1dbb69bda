@@ -32,8 +32,10 @@ type keyring struct {
 
 var errLocked = errors.New("agent: locked")
 
-// NewKeyring returns an Agent that holds keys in memory.  It is safe
-// for concurrent use by multiple goroutines.
+// NewKeyring returns an Agent that holds keys in memory.  It is safe for
+// concurrent use by multiple goroutines.
+//
+// The returned Agent only supports the "lifetime" constraint.
 func NewKeyring() Agent {
 	return &keyring{}
 }
@@ -153,6 +155,10 @@ func (r *keyring) Add(key AddedKey) error {
 	defer r.mu.Unlock()
 	if r.locked {
 		return errLocked
+	}
+
+	if key.ConfirmBeforeUse {
+		return errors.New("agent: confirm before use constraint is not supported")
 	}
 
 	if len(key.ConstraintExtensions) > 0 {

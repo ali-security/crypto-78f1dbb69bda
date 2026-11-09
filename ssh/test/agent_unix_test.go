@@ -26,9 +26,8 @@ func TestAgentForward(t *testing.T) {
 		t.Fatalf("Error adding key: %s", err)
 	}
 	if err := keyring.Add(agent.AddedKey{
-		PrivateKey:       testPrivateKeys["dsa"],
-		ConfirmBeforeUse: true,
-		LifetimeSecs:     3600,
+		PrivateKey:   testPrivateKeys["dsa"],
+		LifetimeSecs: 3600,
 	}); err != nil {
 		t.Fatalf("Error adding key with constraints: %s", err)
 	}
