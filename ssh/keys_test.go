@@ -169,6 +169,31 @@ func TestParseRSAPrivateKey(t *testing.T) {
 	}
 }
 
+func TestParseRSAModulusLimit(t *testing.T) {
+	// A 16384-bit modulus is the largest OpenSSH will generate and must be
+	// accepted.
+	rsa16384 := "ssh-rsa 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"
+	if _, _, _, _, err := ParseAuthorizedKey([]byte(rsa16384)); err != nil {
+		t.Fatalf("ParseAuthorizedKey rejected a 16384-bit modulus: %v", err)
+	}
+
+	// A modulus larger than 16384 bits must be rejected to bound the cost of
+	// verifying an attacker-supplied key.
+	n := new(big.Int).Lsh(big.NewInt(1), 16384) // 16385 bits
+	pub, err := NewPublicKey(&rsa.PublicKey{N: n, E: 65537})
+	if err != nil {
+		t.Fatalf("NewPublicKey: %v", err)
+	}
+	_, err = ParsePublicKey(pub.Marshal())
+	if err == nil {
+		t.Fatal("ParsePublicKey accepted a modulus larger than 16384 bits; expected it to be rejected")
+	}
+	expectedError := "rsa modulus too large"
+	if !strings.Contains(err.Error(), expectedError) {
+		t.Errorf("unexpected error message: got %q, want substring %q", err.Error(), expectedError)
+	}
+}
+
 func TestParseECPrivateKey(t *testing.T) {
 	key := testPrivateKeys["ecdsa"]
 
@@ -281,6 +306,105 @@ func TestMarshalParsePublicKey(t *testing.T) {
 	}
 	if !reflect.DeepEqual(actPub, pub) {
 		t.Errorf("got %v, expected %v", actPub, pub)
+	}
+}
+
+func TestParseDSAHugeQ(t *testing.T) {
+	P := new(big.Int).Lsh(big.NewInt(1), 1023)
+	Q := new(big.Int).Lsh(big.NewInt(1), 20000) // very large
+	// G and Y: Dummy values, just needs to be < P to pass that specific check
+	G := big.NewInt(2)
+	Y := big.NewInt(5)
+
+	rawKey := struct {
+		P, Q, G, Y *big.Int
+	}{
+		P: P,
+		Q: Q,
+		G: G,
+		Y: Y,
+	}
+
+	inputBytes := Marshal(&rawKey)
+
+	_, _, err := parseDSA(inputBytes)
+	if err == nil {
+		t.Fatal("parseDSA accepted a DSA key with large Q")
+	}
+
+	expectedError := "ssh: unsupported DSA sub-prime size"
+	if !strings.Contains(err.Error(), expectedError) {
+		t.Errorf("unexpected error message: got %q, want substring %q", err.Error(), expectedError)
+	}
+}
+
+func TestParseDSAYOutOfRange(t *testing.T) {
+	// Valid 1024/160 parameters (values don't need to be a real DSA group,
+	// they only need to pass the checkDSAParams bit-length checks and the
+	// G < P / G > 0 checks).
+	P := new(big.Int).Lsh(big.NewInt(1), 1023)
+	P.SetBit(P, 0, 1) // make P odd so it can pass as a prime candidate shape
+	Q := new(big.Int).Lsh(big.NewInt(1), 159)
+	Q.SetBit(Q, 0, 1)
+	G := big.NewInt(2)
+
+	for _, tc := range []struct {
+		name string
+		Y    *big.Int
+	}{
+		{"Y_zero", big.NewInt(0)},
+		{"Y_negative", big.NewInt(-1)},
+		{"Y_equals_P", new(big.Int).Set(P)},
+		{"Y_greater_than_P", new(big.Int).Add(P, big.NewInt(1))},
+		{"Y_much_greater_than_P", new(big.Int).Lsh(big.NewInt(1), 20000)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rawKey := struct {
+				P, Q, G, Y *big.Int
+			}{P: P, Q: Q, G: G, Y: tc.Y}
+
+			_, _, err := parseDSA(Marshal(&rawKey))
+			if err == nil {
+				t.Fatalf("parseDSA accepted a DSA key with Y=%s (P=%s)", tc.Y, P)
+			}
+			expectedError := "DSA public value Y out of range"
+			if !strings.Contains(err.Error(), expectedError) {
+				t.Errorf("unexpected error message: got %q, want substring %q", err.Error(), expectedError)
+			}
+		})
+	}
+}
+
+func TestParseDSAGeneratorOutOfRange(t *testing.T) {
+	P := new(big.Int).Lsh(big.NewInt(1), 1023)
+	P.SetBit(P, 0, 1)
+	Q := new(big.Int).Lsh(big.NewInt(1), 159)
+	Q.SetBit(Q, 0, 1)
+	Y := big.NewInt(5)
+
+	for _, tc := range []struct {
+		name          string
+		G             *big.Int
+		expectedError string
+	}{
+		{"G_zero", big.NewInt(0), "DSA generator must be positive"},
+		{"G_negative", big.NewInt(-2), "DSA generator must be positive"},
+		{"G_equals_P", new(big.Int).Set(P), "DSA generator larger than modulus"},
+		{"G_much_greater_than_P", new(big.Int).Lsh(big.NewInt(1), 20000), "DSA generator larger than modulus"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rawKey := struct {
+				P, Q, G, Y *big.Int
+			}{P: P, Q: Q, G: tc.G, Y: Y}
+
+			_, _, err := parseDSA(Marshal(&rawKey))
+			if err == nil {
+				t.Fatalf("parseDSA accepted a DSA key with G=%s (P=%s)", tc.G, P)
+			}
+			if !strings.Contains(err.Error(), tc.expectedError) {
+				t.Errorf("unexpected error message: got %q, want substring %q", err.Error(), tc.expectedError)
+			}
+		})
 	}
 }
 
