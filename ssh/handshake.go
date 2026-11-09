@@ -34,6 +34,16 @@ type keyingTransport interface {
 	// direction will be effected if a msgNewKeys message is sent
 	// or received.
 	prepareKeyChange(*algorithms, *kexResult) error
+
+	// setStrictMode sets the strict KEX mode, notably triggering
+	// sequence number resets on sending or receiving msgNewKeys.
+	// If the sequence number is already > 1 when setStrictMode
+	// is called, an error is returned.
+	setStrictMode() error
+
+	// setInitialKEXDone indicates to the transport that the initial key exchange
+	// was completed
+	setInitialKEXDone()
 }
 
 // handshakeTransport implements rekeying on top of a keyingTransport
@@ -94,6 +104,10 @@ type handshakeTransport struct {
 
 	// The session ID or nil if first kex did not complete yet.
 	sessionID []byte
+
+	// strictMode indicates if the other side of the handshake indicated
+	// that we should be following the strict KEX protocol restrictions.
+	strictMode bool
 }
 
 type pendingKex struct {
@@ -201,7 +215,10 @@ func (t *handshakeTransport) readLoop() {
 			close(t.incoming)
 			break
 		}
-		if p[0] == msgIgnore || p[0] == msgDebug {
+		// If this is the first kex, and strict KEX mode is enabled,
+		// we don't ignore any messages, as they may be used to manipulate
+		// the packet sequence numbers.
+		if !(t.sessionID == nil && t.strictMode) && (p[0] == msgIgnore || p[0] == msgDebug) {
 			continue
 		}
 		t.incoming <- p
@@ -432,6 +449,11 @@ func (t *handshakeTransport) readOnePacket(first bool) ([]byte, error) {
 	return successPacket, nil
 }
 
+const (
+	kexStrictClient = "kex-strict-c-v00@openssh.com"
+	kexStrictServer = "kex-strict-s-v00@openssh.com"
+)
+
 // sendKexInit sends a key change message.
 func (t *handshakeTransport) sendKexInit() error {
 	t.mu.Lock()
@@ -445,7 +467,6 @@ func (t *handshakeTransport) sendKexInit() error {
 	}
 
 	msg := &kexInitMsg{
-		KexAlgos:                t.config.KeyExchanges,
 		CiphersClientServer:     t.config.Ciphers,
 		CiphersServerClient:     t.config.Ciphers,
 		MACsClientServer:        t.config.MACs,
@@ -454,6 +475,12 @@ func (t *handshakeTransport) sendKexInit() error {
 		CompressionServerClient: supportedCompressions,
 	}
 	io.ReadFull(rand.Reader, msg.Cookie[:])
+
+	// We mutate the KexAlgos slice, in order to add the kex-strict extension algorithm.
+	// Since the slice may be user owned KeyExchanges, we create our own slice in order
+	// to avoid using user owned memory by mistake.
+	msg.KexAlgos = make([]string, 0, len(t.config.KeyExchanges)+1) // room for kex-strict
+	msg.KexAlgos = append(msg.KexAlgos, t.config.KeyExchanges...)
 
 	isServer := len(t.hostKeys) > 0
 	if isServer {
@@ -474,8 +501,16 @@ func (t *handshakeTransport) sendKexInit() error {
 				msg.ServerHostKeyAlgos = append(msg.ServerHostKeyAlgos, keyFormat)
 			}
 		}
+
+		if t.sessionID == nil {
+			msg.KexAlgos = append(msg.KexAlgos, kexStrictServer)
+		}
 	} else {
 		msg.ServerHostKeyAlgos = t.hostKeyAlgorithms
+
+		if t.sessionID == nil {
+			msg.KexAlgos = append(msg.KexAlgos, kexStrictClient)
+		}
 	}
 
 	packet := Marshal(msg)
@@ -572,6 +607,13 @@ func (t *handshakeTransport) enterKeyExchange(otherInitPacket []byte) error {
 		return err
 	}
 
+	if t.sessionID == nil && ((isClient && contains(serverInit.KexAlgos, kexStrictServer)) || (!isClient && contains(clientInit.KexAlgos, kexStrictClient))) {
+		t.strictMode = true
+		if err := t.conn.setStrictMode(); err != nil {
+			return err
+		}
+	}
+
 	// We don't send FirstKexFollows, but we handle receiving it.
 	//
 	// RFC 4253 section 7 defines the kex and the agreement method for
@@ -621,6 +663,10 @@ func (t *handshakeTransport) enterKeyExchange(otherInitPacket []byte) error {
 		return err
 	} else if packet[0] != msgNewKeys {
 		return unexpectedMessageError(msgNewKeys, packet[0])
+	}
+
+	if t.strictMode {
+		t.conn.setInitialKEXDone()
 	}
 
 	return nil
