@@ -1,0 +1,173 @@
+name: CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'go test package pattern/flags to run; empty runs the full suite'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  module-zip:
+    name: Module zip
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      # Only used to build the x/mod zip helper (x/mod v0.24.0 needs Go >= 1.22);
+      # the module zip format does not depend on the Go version.
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23'
+        cache: false
+
+    - name: Build module zip helper
+      run: |
+        set -eux
+        HELPER=$(mktemp -d)
+        cp "$GITHUB_WORKSPACE/.github/create_mod.go" "$HELPER/"
+        cd "$HELPER"
+        go mod init example.com/mod
+        go get golang.org/x/mod@v0.24.0
+        go build -o "$RUNNER_TEMP/create_mod" .
+
+    - name: Create module zip
+      run: |
+        set -eux
+        mkdir -p "$RUNNER_TEMP/out"
+        # .github only holds this build workflow and its helper; it is not part
+        # of the published module zip.
+        rm -rf "$GITHUB_WORKSPACE/.github"
+        "$RUNNER_TEMP/create_mod" golang.org/x/crypto v0.0.0-20211117183948-ae814b36b871 "$GITHUB_WORKSPACE" "$RUNNER_TEMP/out/v0.0.0-20211117183948-ae814b36b871.zip"
+        unzip -l "$RUNNER_TEMP/out/v0.0.0-20211117183948-ae814b36b871.zip" | tail -n 1
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: module-zip
+        path: ${{ runner.temp }}/out/v0.0.0-20211117183948-ae814b36b871.zip
+        if-no-files-found: error
+
+  test:
+    name: Test (${{ matrix.os }}, Go ${{ matrix.go }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        # go.mod declares go 1.17, the toolchain current at the 2021-11 release.
+        # ubuntu-22.04 ships OpenSSH 8.9, which still supports the DSA keys the
+        # 2021 ssh/agent and ssh/test suites load into the system ssh-agent/sshd;
+        # ubuntu-24.04's OpenSSH 9.6 rejects them ("agent: failure",
+        # "Unable to load host key id_dsa: invalid format").
+        - os: ubuntu-22.04
+          go: '1.17'
+          ldflags: ''
+        # Go 1.17 binaries lack LC_UUID and are killed by dyld on current macOS
+        # arm64 runners, so the macOS leg uses Go 1.23. -checklinkname=0 lets the
+        # 2021 x/sys pull-linknames into the runtime/syscall link under Go 1.23.
+        - os: macos-latest
+          go: '1.23'
+          ldflags: '-ldflags=-checklinkname=0'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ matrix.go }}
+        cache: false
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Verify dependencies
+      run: go mod verify
+
+    - name: Build
+      run: |
+        set -eux
+        go version
+        go build -v ${{ matrix.ldflags }} ./...
+
+    - name: Build sshd password test module
+      if: runner.os == 'Linux'
+      # ssh/test TestMultiAuth needs this PAM-less shim; it skips without it.
+      run: gcc -Wall -shared -o ssh/test/sshd_test_pw.so -fPIC ssh/test/sshd_test_pw.c
+
+    - name: Run tests
+      run: |
+        set -euxo pipefail
+        PKGS=(${{ inputs.test-filter || './...' }})
+        SKIP=()
+        if [ "$RUNNER_OS" = "macOS" ]; then
+          # macOS runner TMPDIR (/var/folders/...) makes ssh-agent's Unix socket
+          # path exceed the sun_path limit in ssh/agent tests; use a short one.
+          export TMPDIR=/tmp
+          # ssh/agent TestAgent and TestLockOpenSSHAgent add DSA keys to the system
+          # ssh-agent; macOS ships OpenSSH 9.x built without DSA, so the agent
+          # answers "agent: failure". Both run and pass on the Linux leg (OpenSSH 8.9).
+          echo "macOS: not running ssh/agent TestAgent, TestLockOpenSSHAgent (system ssh-agent lacks DSA; covered on Linux leg)"
+          SKIP=(-skip '^(TestAgent|TestLockOpenSSHAgent)$')
+          if [ -z "${{ inputs.test-filter }}" ]; then
+            # Every test in ssh/test drives the system sshd. On macOS runners
+            # sshd-session fails with "BSM audit: setaudit_addr failed"
+            # (golang/go#64959; this 2021 snapshot predates upstream's
+            # skipIfIssue64959) and TestAgentForward hangs until the 10m timeout.
+            # The package runs in full on the Linux leg.
+            echo "macOS: excluding package golang.org/x/crypto/ssh/test (system sshd unusable, golang/go#64959)"
+            PKGS=($(go list ./... | grep -v '^golang.org/x/crypto/ssh/test$'))
+          fi
+        fi
+        go test -v ${{ matrix.ldflags }} "${SKIP[@]}" "${PKGS[@]}" 2>&1 | tee "$RUNNER_TEMP/go-test.log"
+
+    - name: Test summary
+      if: always()
+      run: |
+        set -eu
+        LOG="$RUNNER_TEMP/go-test.log"
+        awk '
+          { sub(/\r$/, "") }
+          /^=== (RUN|CONT|NAME) / { cur = $3; next }
+          /^[ \t]+[A-Za-z0-9_]+\.go:[0-9]+: / {
+            m = $0; sub(/^[ \t]+/, "", m)
+            if (cur != "" && !(tolower(msg[cur]) ~ /skip/ && tolower(m) !~ /skip/)) msg[cur] = m
+            next
+          }
+          /^[ \t]*--- SKIP:/ {
+            skip++
+            name = $3; r = msg[name]
+            if (r == "") r = "(no message)"
+            skips[++ns] = "  SKIP " name " -- " r
+            next
+          }
+          /^[ \t]*--- PASS:/ { pass++; next }
+          /^[ \t]*--- FAIL:/ { fail++; next }
+          /^(ok|FAIL|\?)[ \t]/ {
+            if ($1 == "ok") pok++
+            if ($1 == "FAIL") pfail++
+            print
+            for (i = 1; i <= ns; i++) print skips[i]
+            ns = 0
+            delete msg
+            next
+          }
+          END {
+            printf "packages ok: %d, packages FAIL: %d\n", pok, pfail
+            printf "tests passed: %d, tests failed: %d, tests skipped: %d\n", pass, fail, skip
+          }
+        ' "$LOG"
