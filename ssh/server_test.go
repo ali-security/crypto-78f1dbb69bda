@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"strings"
 	"testing"
 )
 
@@ -186,4 +187,189 @@ func TestServerAuthSKUserPresence(t *testing.T) {
 			t.Errorf("plain RSA auth must still work: %v", err)
 		}
 	})
+}
+
+// doClientServerAuth runs a handshake with the given server and client
+// configs and returns the server side authentication errors, as seen by
+// AuthLogCallback, together with the client side error.
+func doClientServerAuth(t *testing.T, serverConfig *ServerConfig, clientConfig *ClientConfig) ([]error, error) {
+	c1, c2, err := netPipe()
+	if err != nil {
+		t.Fatalf("netPipe: %v", err)
+	}
+	defer c1.Close()
+	defer c2.Close()
+
+	var serverAuthErrors []error
+
+	serverConfig.AddHostKey(testSigners["rsa"])
+	serverConfig.AuthLogCallback = func(conn ConnMetadata, method string, err error) {
+		serverAuthErrors = append(serverAuthErrors, err)
+	}
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		newServer(c1, serverConfig)
+	}()
+	c, _, _, err := NewClientConn(c2, "", clientConfig)
+	if err == nil {
+		c.Close()
+	}
+	// Wait for the server to finish before reading serverAuthErrors, which
+	// is written by the server goroutine.
+	c2.Close()
+	<-serverDone
+	return serverAuthErrors, err
+}
+
+func TestAuthCallbacksSourceAddress(t *testing.T) {
+	permsWithSourceAddress := func(sourceAddress string) *Permissions {
+		return &Permissions{
+			CriticalOptions: map[string]string{
+				sourceAddressCriticalOption: sourceAddress,
+			},
+		}
+	}
+	methods := []struct {
+		name         string
+		serverConfig func(sourceAddress string) *ServerConfig
+		clientAuth   []AuthMethod
+	}{
+		{
+			name: "password",
+			serverConfig: func(sourceAddress string) *ServerConfig {
+				return &ServerConfig{
+					PasswordCallback: func(conn ConnMetadata, password []byte) (*Permissions, error) {
+						return permsWithSourceAddress(sourceAddress), nil
+					},
+				}
+			},
+			clientAuth: []AuthMethod{Password(clientPassword)},
+		},
+		{
+			name: "keyboard-interactive",
+			serverConfig: func(sourceAddress string) *ServerConfig {
+				return &ServerConfig{
+					KeyboardInteractiveCallback: func(conn ConnMetadata, challenge KeyboardInteractiveChallenge) (*Permissions, error) {
+						return permsWithSourceAddress(sourceAddress), nil
+					},
+				}
+			},
+			clientAuth: []AuthMethod{
+				KeyboardInteractive(func(name, instruction string, questions []string, echos []bool) ([]string, error) {
+					return nil, nil
+				}),
+			},
+		},
+	}
+	for _, method := range methods {
+		for _, tc := range []struct {
+			name          string
+			sourceAddress string
+			wantErr       bool
+		}{
+			{"mismatching", "192.168.99.99", true},
+			{"matching", "127.0.0.0/8,::1/128", false},
+		} {
+			method, tc := method, tc
+			t.Run(method.name+"/"+tc.name, func(t *testing.T) {
+				clientConf := &ClientConfig{
+					User:            "user",
+					Auth:            method.clientAuth,
+					HostKeyCallback: InsecureIgnoreHostKey(),
+				}
+				serverAuthErrors, err := doClientServerAuth(t, method.serverConfig(tc.sourceAddress), clientConf)
+				if tc.wantErr {
+					if err == nil {
+						t.Fatalf("client login succeeded with %s callback returning mismatching source-address", method.name)
+					}
+					var sourceAddressErrors int
+					for _, err := range serverAuthErrors {
+						if err != nil && strings.Contains(err.Error(), "source-address restriction") {
+							sourceAddressErrors++
+						}
+					}
+					if sourceAddressErrors == 0 {
+						t.Fatalf("no server auth error mentions the source-address restriction, got %v", serverAuthErrors)
+					}
+				} else if err != nil {
+					t.Fatalf("client login failed with matching source-address: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestGSSAPIWithMICCallbackSourceAddress(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		sourceAddress string
+		wantErr       bool
+	}{
+		{"mismatching", "192.168.99.99", true},
+		{"matching", "127.0.0.0/8,::1/128", false},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			serverConfig := &ServerConfig{
+				GSSAPIWithMICConfig: &GSSAPIWithMICConfig{
+					AllowLogin: func(conn ConnMetadata, srcName string) (*Permissions, error) {
+						return &Permissions{
+							CriticalOptions: map[string]string{
+								sourceAddressCriticalOption: tc.sourceAddress,
+							},
+						}, nil
+					},
+					Server: &FakeServer{
+						exchanges: []*exchange{
+							{
+								outToken:      "server-valid-token-1",
+								expectedToken: "client-valid-token-1",
+							},
+						},
+						maxRound:    1,
+						expectedMIC: []byte("valid-mic"),
+						srcName:     "user@DOMAIN",
+					},
+				},
+			}
+			clientConf := &ClientConfig{
+				User: "user",
+				Auth: []AuthMethod{
+					GSSAPIWithMICAuthMethod(
+						&FakeClient{
+							exchanges: []*exchange{
+								{
+									outToken: "client-valid-token-1",
+								},
+								{
+									expectedToken: "server-valid-token-1",
+								},
+							},
+							mic:      []byte("valid-mic"),
+							maxRound: 2,
+						}, "testtarget",
+					),
+				},
+				HostKeyCallback: InsecureIgnoreHostKey(),
+			}
+			serverAuthErrors, err := doClientServerAuth(t, serverConfig, clientConf)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("client login succeeded with gssapi-with-mic AllowLogin returning mismatching source-address")
+				}
+				var sourceAddressErrors int
+				for _, err := range serverAuthErrors {
+					if err != nil && strings.Contains(err.Error(), "source-address restriction") {
+						sourceAddressErrors++
+					}
+				}
+				if sourceAddressErrors == 0 {
+					t.Fatalf("no server auth error mentions the source-address restriction, got %v", serverAuthErrors)
+				}
+			} else if err != nil {
+				t.Fatalf("client login failed with matching source-address: %v", err)
+			}
+		})
+	}
 }
