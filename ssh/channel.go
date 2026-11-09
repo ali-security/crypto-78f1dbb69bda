@@ -492,7 +492,8 @@ func (ch *channel) handlePacket(packet []byte) error {
 		default:
 		}
 	default:
-		ch.msg <- msg
+		// No other message type is expected on an established channel.
+		return fmt.Errorf("ssh: unexpected message type %d on channel %d", packet[0], ch.localId)
 	}
 	return nil
 }

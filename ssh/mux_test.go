@@ -5,10 +5,12 @@
 package ssh
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1275,6 +1277,54 @@ func TestChannelUndecidedOutboundDropsMessages(t *testing.T) {
 	}
 	if n := len(ch.msg); n != 0 {
 		t.Fatalf("msg should be empty, has %d entries", n)
+	}
+}
+
+func TestChannelBogusMessageTearsDownMux(t *testing.T) {
+	// A message that is well-formed on the wire but is not a type expected on
+	// an established channel is a protocol error that tears the mux down.
+	clientMux, serverMux := muxPair()
+	defer serverMux.Close()
+	defer clientMux.Close()
+
+	serverRes := make(chan *channel, 1)
+	go func() {
+		newCh, ok := <-serverMux.incomingChannels
+		if !ok {
+			close(serverRes)
+			return
+		}
+		c, _, err := newCh.Accept()
+		if err != nil {
+			close(serverRes)
+			return
+		}
+		serverRes <- c.(*channel)
+	}()
+
+	if _, err := clientMux.openChannel("chan", nil); err != nil {
+		t.Fatalf("openChannel: %v", err)
+	}
+	serverCh := <-serverRes
+	if serverCh == nil {
+		t.Fatal("server did not accept channel")
+	}
+
+	// Craft a packet that the client mux routes to clientCh (bytes 1:5 hold the
+	// peer's channel id) and that decode accepts, but whose type is unexpected
+	// on a channel. The service-string length equals the channel id, so the
+	// same four bytes serve both as the routing id and as the string length.
+	id := serverCh.remoteId
+	packet := []byte{msgServiceRequest, 0, 0, 0, 0}
+	binary.BigEndian.PutUint32(packet[1:], id)
+	packet = append(packet, make([]byte, id)...)
+	if err := serverMux.conn.writePacket(packet); err != nil {
+		t.Fatalf("writePacket: %v", err)
+	}
+
+	// The mux loop exits with the protocol error.
+	if err := clientMux.Wait(); err == nil || !strings.Contains(err.Error(), "unexpected message type") {
+		t.Fatalf("mux error = %v, want unexpected message type", err)
 	}
 }
 
