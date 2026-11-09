@@ -74,3 +74,27 @@ func TestKeyringAddingAndRemoving(t *testing.T) {
 	}
 	validateListedKeys(t, k, []string{})
 }
+
+func TestAddKeyWithConstraints(t *testing.T) {
+	// Verifies the keyring refuses keys carrying constraint extensions it
+	// cannot enforce.
+	agent, cleanup := startKeyringAgent(t)
+	defer cleanup()
+
+	constraints := []ConstraintExtension{
+		{
+			ExtensionName:    "extension1",
+			ExtensionDetails: []byte("details1"),
+		},
+	}
+
+	key := testPrivateKeys["rsa"]
+
+	err := agent.Add(AddedKey{
+		PrivateKey:           key,
+		ConstraintExtensions: constraints,
+	})
+	if err == nil {
+		t.Fatal("adding a key with unsupported constraints succeeded")
+	}
+}
